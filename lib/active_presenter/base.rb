@@ -6,13 +6,13 @@ module ActivePresenter
     extend  ActiveModel::Naming
     extend  ActiveModel::Translation
     include ActiveModel::Conversion
+    include ActiveModel::MassAssignmentSecurity
 
     attr_reader :errors
     
     define_model_callbacks :validation, :save
     
-    class_inheritable_accessor :presented
-    class_inheritable_accessor :attr_protected, :attr_accessible
+    class_attribute :presented
     self.presented = {}
     
     # Indicates which models are to be presented by this presenter.
@@ -34,12 +34,12 @@ module ActivePresenter
 
       attr_accessor *types_and_classes.keys
       
-      types_and_classes.keys.each do |t|
-        define_method("#{t}_errors") do
-          send(t).errors
+      types_and_classes.each do |key, value|
+        define_method("#{key}_errors") do
+          send(key).errors
         end
         
-        presented[t] = types_and_classes[t]
+        self.presented = self.presented.merge({ key => value })
       end
     end
     
@@ -77,26 +77,28 @@ module ActivePresenter
     # Note that +attr_protected+ is still applied to the received hash. Thus,
     # with this technique you can at most _extend_ the list of protected
     # attributes for a particular mass-assignment call.
-    def self.attr_protected(*attributes)
-      write_inheritable_attribute(:attr_protected, Set.new(attributes.map {|a| a.to_s}) + (protected_attributes || []))
-    end
+    # def self.attr_protected(*attributes)
+    #   self.protected_attributes = Set.new(attributes.map(&:to_s)) + (protected_attributes || [])
+    #   # write_inheritable_attribute(:attr_protected, Set.new(attributes.map {|a| a.to_s}) + (protected_attributes || []))
+    # end
 
     # Returns an array of all the attributes that have been protected from mass-assignment.
-    def self.protected_attributes # :nodoc:
-      read_inheritable_attribute(:attr_protected)
-    end
+    # def self.protected_attributes # :nodoc:
+    #   read_inheritable_attribute(:attr_protected)
+    # end
 
     # Note that +attr_accessible+ is still applied to the received hash. Thus,
     # with this technique you can at most _narrow_ the list of accessible
     # attributes for a particular mass-assignment call.
-    def self.attr_accessible(*attributes)
-      write_inheritable_attribute(:attr_accessible, Set.new(attributes.map(&:to_s)) + (accessible_attributes || []))
-    end
+    # def self.attr_accessible(*attributes)
+    #   self.accessible_attributes = Set.new(attributes.map(&:to_s)) + (accessible_attributes || [])
+    #   # write_inheritable_attribute(:attr_accessible, Set.new(attributes.map(&:to_s)) + (accessible_attributes || []))
+    # end
 
     # Returns an array of all the attributes that have been made accessible to mass-assignment.
-    def self.accessible_attributes # :nodoc:
-      read_inheritable_attribute(:attr_accessible)
-    end
+    # def self.accessible_attributes # :nodoc:
+    #   read_inheritable_attribute(:attr_accessible)
+    # end
     
     # Accepts arguments in two forms. For example, if you had a SignupPresenter that presented User, and Account, you could specify arguments in the following two forms:
     #
@@ -124,26 +126,37 @@ module ActivePresenter
     # the type_attribute form (i.e. user_login => 'james'), or
     # the multiparameter attribute form (i.e. {user_birthday(1i) => "1980", user_birthday(2i) => "3"})
     #
-    def attributes=(attrs)
-      return if attrs.nil?
+    def attributes=(attrs, options = {})
+      return unless attrs.is_a?(Hash)
 
-      attrs = attrs.stringify_keys      
+      attrs = attrs.stringify_keys
       multi_parameter_attributes = {}
-      attrs = remove_attributes_protected_from_mass_assignment(attrs)
+      @mass_assignment_options = options
+      attrs = sanitize_for_mass_assignment(attrs, mass_assignment_role)
       
-      attrs.each do |k,v|
-        if (base_attribute = k.to_s.split("(").first) != k.to_s
-          presentable = presentable_for(base_attribute)
-          multi_parameter_attributes[presentable] ||= {}
-          multi_parameter_attributes[presentable].merge!(flatten_attribute_name(k,presentable).to_sym => v)
-        else
-          send("#{k}=", v) unless attribute_protected?(k)
-        end
+      attrs = attrs.each_with_object({}) do |(k,v), memo|
+        presentable = presentable_for(k)
+        memo[ presentable ] ||= {}
+        memo[ presentable ].merge!({ flatten_attribute_name(k, presentable) => v })
       end
+
+      attrs.keys.each do |presentable|
+        send(presentable).send(:assign_attributes, attrs[presentable], :as => mass_assignment_role)
+      end
+
+      # attrs.each do |k,v|
+      #   presentable = presentable_for(base_attribute)
+      #   if (base_attribute = k.to_s.split("(").first) != k.to_s
+      #     multi_parameter_attributes[presentable] ||= {}
+      #     multi_parameter_attributes[presentable].merge!(flatten_attribute_name(k,presentable).to_sym => v)
+      #   else
+      #     send("#{k}=", v)
+      #   end
+      # end
       
-      multi_parameter_attributes.each do |presentable,multi_attrs|
-        send(presentable).send(:attributes=, multi_attrs)
-      end
+      # multi_parameter_attributes.each do |presentable,multi_attrs|
+      #   send(presentable).send(:attributes=, multi_attrs)
+      # end
     end
     
     # Makes sure that the presenter is accurate about responding to presentable's attributes, even though they are handled by method_missing.
@@ -251,6 +264,14 @@ module ActivePresenter
     end
 
     protected
+      def mass_assignment_options
+        @mass_assignment_options ||= {}
+      end
+
+      def mass_assignment_role
+        mass_assignment_options[:as] || :default
+      end
+
       def presented_instances
         presented.keys.map { |key| send(key) }
       end
@@ -289,24 +310,24 @@ module ActivePresenter
         end
       end
       
-      def attribute_protected?(name)
-        presentable    = presentable_for(name)
-        return false unless presentable
-        flat_attribute = {flatten_attribute_name(name, presentable) => ''} #remove_att... normally takes a hash, so we use a ''
-        presented[presentable].new.send(:remove_attributes_protected_from_mass_assignment, flat_attribute).empty?
-      end
+      # def attribute_protected?(name)
+      #   presentable    = presentable_for(name)
+      #   return false unless presentable
+      #   flat_attribute = {flatten_attribute_name(name, presentable) => ''} #remove_att... normally takes a hash, so we use a ''
+      #   protected_attributes.include?(flat_attribute)
+      # end
       
-      def remove_attributes_protected_from_mass_assignment(attributes)
-        if self.class.accessible_attributes.nil? && self.class.protected_attributes.nil?
-          attributes
-        elsif self.class.protected_attributes.nil?
-          attributes.reject { |key, value| !self.class.accessible_attributes.include?(key.gsub(/\(.+/, ""))}
-        elsif self.class.accessible_attributes.nil?
-          attributes.reject { |key, value| self.class.protected_attributes.include?(key.gsub(/\(.+/,""))}
-        else
-          raise "Declare either attr_protected or attr_accessible for #{self.class}, but not both."
-        end
-      end
+      # def remove_attributes_protected_from_mass_assignment(attributes)
+      #   if self.class.accessible_attributes.nil? && self.class.protected_attributes.nil?
+      #     attributes
+      #   elsif self.class.protected_attributes.nil?
+      #     attributes.reject { |key, value| !self.class.accessible_attributes.include?(key.gsub(/\(.+/, ""))}
+      #   elsif self.class.accessible_attributes.nil?
+      #     attributes.reject { |key, value| self.class.protected_attributes.include?(key.gsub(/\(.+/,""))}
+      #   else
+      #     raise "Declare either attr_protected or attr_accessible for #{self.class}, but not both."
+      #   end
+      # end
       
   end
 end

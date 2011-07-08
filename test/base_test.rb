@@ -30,7 +30,6 @@ Expectations do
   end
 
   # admin= should be protected from mass assignment
-  expect SignupPresenter.new.to.be.attribute_protected?(:user_admin)
   expect SignupPresenter.new(:user_admin => true).user.not.to.be.admin?
 
   expect 'mymockvalue' do
